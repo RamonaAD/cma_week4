@@ -1,0 +1,454 @@
+---
+title: "Week_4_Exercises"
+format: typst
+execute: 
+  error: true
+  echo: true
+warning: false
+---
+
+# Exercise A: Segmentation
+
+With the skills from Input: Segmentation you can now implement the segmentation algorithm described in Laube and Purves (2011) to either your own movement data or to a different wild boar using different sampling intervals.
+
+```{r}
+
+library(tidyverse)
+library(sf)
+library(tmap)
+
+# load data into R. I use the one from the whales to see if it works. 
+whales <- read_delim("Movements of Australia's east coast humpback whales.csv")
+
+unique(whales$'individual-local-identifier')
+
+# I choose the first whale (53348) for this exercise
+
+sample_whale <- whales |>
+    st_as_sf(coords = c("location-long", "location-lat"), crs = 4326, remove = FALSE) |>
+    filter(
+      `individual-local-identifier` == "53348",
+      timestamp >= "2008-10-23", 
+      timestamp < "2011-07-26"
+      )
+
+#delete rows that are double
+sample_whale <- sample_whale |>
+  filter(!is.na(`argos:lat`))
+
+# show with ggplot
+ggplot(sample_whale) +
+  geom_sf() +
+  labs(
+    x = "Longitude",
+    y = "Latitude",
+    title = "Whale GPS Track"
+  ) +
+  theme_minimal()
+
+ggplot(data = sample_whale) +
+  geom_sf() +
+  geom_path(aes(`location-long`, `location-lat`))
+
+# with tmap
+tm_shape(sample_whale) +
+  tm_basemap("OpenStreetMap") +
+  tm_dots() 
+
+```
+
+
+**specify a temporal window**
+
+sampling window is 30 seconds from 00:00-04:00 UTC and 12:00-16:00 UTC
+
+This means, that I have 2 periods of 4h where sampling takes place. Therefore, I need to specify it! 
+
+Also I choose a temporal window of 120 seconds, thus 4 fixes. 
+
+```{r}
+# I create a function for distance
+distance_by_element <- function(later, now) {
+  as.numeric(
+    st_distance(later, now, by_element = TRUE)
+  )
+}
+
+sampling_v_whale <- sample_whale |> 
+  mutate(t_minus_120 = timestamp - 120, 
+         t_minus_60 = timestamp - 60, 
+         t_plus_60 = timestamp + 60,
+         t_plus_120 = timestamp + 120)
+
+
+sampling_v_whale <- sample_whale |>
+  mutate(
+    gap = as.numeric(difftime(timestamp, lag(timestamp), units = "secs")),
+    segment = cumsum(ifelse(is.na(gap) | gap > 120, 1, 0))
+  )
+
+sampling_v_whale <- sampling_v_whale |>
+  group_by(segment) |>
+  mutate(
+    nMinus2 = distance_by_element(lag(geometry, 4), geometry),
+    nMinus1 = distance_by_element(lag(geometry, 2), geometry),
+    nPlus1  = distance_by_element(geometry, lead(geometry, 2)),
+    nPlus2  = distance_by_element(geometry, lead(geometry, 4))
+  ) |>
+  ungroup()
+
+```
+
+
+I receive lots of NA's. I believe the data needs to be cleaned properly before I can do any calculations. Therefore I use now the wildboar data again. 
+
+
+```{r}
+
+wildschwein <- read_delim("wildschwein_BE_2056.csv")
+
+unique(wildschwein$TierName)
+
+# convert to a spatial object
+Rosa <- wildschwein |>
+    st_as_sf(coords = c("E", "N"), crs = 2056, remove = FALSE) |>
+    filter(
+      TierName == "Rosa",
+      DatetimeUTC >= "2014-11-07", 
+      DatetimeUTC < "2014-12-31"
+      )
+
+# visualise data
+
+ggplot(data = Rosa) +
+  geom_sf() +
+  geom_path(aes(E, N)) # also connect dots with lines. This respects the order the data is in. geom_line would simply go from left to right. 
+
+```
+
+
+## Task 1: Calculate distances
+
+Now, you can Step a): Specify a temporal window v and Step b): Measure the distance to every point within v, which you had used with sabi, on your own movement data or to a different wild boar using different sampling intervals.
+
+```{r}
+
+distance_by_element <- function(later, now) {
+  as.numeric(
+    st_distance(later, now, by_element = TRUE)
+  )
+}
+Rosa <- Rosa |>
+  mutate(nMinus2 = distance_by_element(lag(geometry, 2), geometry)) |> # distance to pos -30 minutes
+  mutate(nMinus1 = distance_by_element(lag(geometry, 1), geometry)) |> # distance to pos -15 minutes
+  mutate(nPlus1 = distance_by_element(geometry, lead(geometry, 1))) |> # distance to pos +15 minutes
+  mutate(nPlus2 = distance_by_element(geometry, lead(geometry, 2))) # distance to pos +30 minutes
+
+# now calculate distances 
+
+Rosa <- Rosa |>
+  rowwise() |>
+  mutate(stepMean = mean(c(nMinus2, nMinus1, nPlus1, nPlus2), na.rm = FALSE)) |>
+  ungroup() # 
+
+```
+
+## Task 2: Specify and apply threshold d
+After calculating the Euclidean distances to positions within the temporal window v in task 1, you can explore these values (we stored them in the column stepMean) using summary statistics (histograms, boxplot, summary()): This way we can define a reasonable threshold value to differentiate between stops and moves. There is no “correct” way of doing this, specifying a threshold always depends on data as well as the question that needs to be answered. In this exercise, use the mean of all stepMean values.
+
+Store the new information (boolean to differentiate between stops (TRUE) and moves (FALSE)) in a new column named static.
+
+```{r}
+# set a treshold
+treshold <- mean(Rosa$stepMean)
+
+head(Rosa)
+
+# we define the treshold here as the mean. 
+Rosa <- Rosa |>
+    mutate(static = stepMean < mean(stepMean, na.rm = TRUE))
+
+Rosa_filter <- Rosa |>
+    filter(!static) # these points are not static!
+
+
+```
+
+## Task 3: Visualize segmented trajectories
+
+```{r}
+
+# shows static points in red 
+Rosa_filter |>
+    ggplot(aes(E, N)) +
+    geom_point(data = Rosa, col = "red") + # this adds the static points
+    geom_path() +
+    geom_point() +
+    coord_fixed() +
+    theme(legend.position = "bottom")
+
+# show moving points
+ggplot(Rosa_filter) +
+  geom_path(aes(E, N)) +
+  geom_sf(aes(color = static))
+
+Rosa |>
+    ggplot(aes(E, N, colour = static)) +
+    geom_path() +
+    geom_point() +
+    coord_fixed() +
+    theme(legend.position = "bottom")
+
+```
+
+## Task 4: Segment-based analysis
+
+In applying Laube and Purves (2011), we’ve come as far as step b) in Figure 16.1. In order to complete the last steps (c and d), we need a unique ID for each segment that we can use as a grouping variable. The following function does just that (it assigns unique IDs based on the column static which you created in Task 2). You will learn about functions next week. For now, just copy the following code chunk into your script and run it.
+
+```{r}
+
+rle_id <- function(vec) {
+    x <- rle(vec)$lengths
+    as.factor(rep(seq_along(x), times = x))
+}
+
+```
+
+You can use the newly created function rle_id to assign unique IDs to subtrajectories (as shown below). 
+
+```{r}
+
+Rosa <- Rosa |>
+    mutate(segment_id = rle_id(static))
+
+```
+
+Visualize the moving segments by colourizing them by segment_ID. Then use segment_ID as a grouping variable to determine the segments duration and remove short segments (e.g. segments with a duration < 5 Minutes)
+
+```{r}
+# visualise 
+
+Rosa |>
+    ggplot(aes(E, N, colour = segment_id)) +
+    geom_path() +
+    geom_point() +
+    coord_fixed() +
+    theme(legend.position = "right")
+
+# group by segment ID and filter out duration more than 5mins.
+
+Valid_segments <- Rosa |>
+  group_by(segment_id) |>
+  summarise(start = min(DatetimeUTC),
+            end = max(DatetimeUTC), 
+            duration = as.numeric(difftime(end, start, units = "mins"))) |>
+  filter(duration >= 5)
+
+Rosa <- Rosa |>
+  filter(segment_id %in% Valid_segments$segment_id)
+
+# now plot again: 
+
+Rosa |>
+    ggplot(aes(E, N, colour = segment_id, group = segment_id)) +
+    geom_path() +
+    coord_fixed() +
+    theme(legend.position = "")
+
+```
+
+# Exercise B:  Similarity 
+
+## Task 1: Similarity measures
+
+We will now calculate similarities between trajectories using a new dataset pedestrian.csv (available on moodle). Download an import this dataset as a data.frame or tibble. It it a set of six different but similar trajectories from pedestrians walking on a path.
+
+For this task, explore the trajectories first and get an idea on how the pedestrians moved.
+
+```{r}
+
+pedestrian <- read_delim("pedestrian.csv")
+
+
+pedestrian |>
+  st_as_sf(coords = c("E", "N"), crs = 2056, remove = FALSE)
+
+pedestrian$TrajID <- as.factor(pedestrian$TrajID)
+
+ggplot(pedestrian, aes(E, N, colour = TrajID)) +
+  geom_point() +
+  facet_wrap(~TrajID) +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+  ) + 
+  labs(x = "E", y = "N",
+       title = "Visual comparison of the 6 trajectories",
+       subtitle = "Each subplot highlights a trajectory")
+  
+
+```
+
+## Task 2: Calculate similarity
+
+```{r}
+
+library(SimilarityMeasures)
+
+```
+
+
+Familiarize yourself with this package by skimming through the function descriptions help(package = "SimilarityMeasures"). Now compare trajectory 1 to trajectories 2-6 using different similarity measures from the package. Your options are. DTW, EditDist, Frechet and LCSS.
+
+All functions in the package need matrices as input, with one trajectory per matrix.
+
+**create matrices**
+```{r}
+
+t1 <- pedestrian |>
+  filter(TrajID == 1) |>
+  select(E, N) |>
+  as.matrix()
+
+t2 <- pedestrian |>
+  filter(TrajID == 2) |>
+  select(E, N) |>
+  as.matrix()
+
+t3 <- pedestrian |>
+  filter(TrajID == 3) |>
+  select(E, N) |>
+  as.matrix()
+
+t4 <- pedestrian |>
+  filter(TrajID == 4) |>
+  select(E, N) |>
+  as.matrix()
+
+t5 <- pedestrian |>
+  filter(TrajID == 5) |>
+  select(E, N) |>
+  as.matrix()
+
+t6 <- pedestrian |>
+  filter(TrajID == 6) |>
+  select(E, N) |>
+  as.matrix()
+
+```
+
+
+### Edit Distance 
+```{r}
+
+EditDist(traj1 = t1, traj2 = t2, pointDistance = 20) #45
+EditDist(traj1 = t1, traj2 = t3, pointDistance = 20) #47
+EditDist(traj1 = t1, traj2 = t4, pointDistance = 20) #42
+EditDist(traj1 = t1, traj2 = t5, pointDistance = 20) #28
+EditDist(traj1 = t1, traj2 = t6, pointDistance = 20) #27
+
+table_df <- data.frame(
+  TrajID = c(2, 3, 4, 5, 6),
+  edit_dist = c(45, 47, 42, 28, 27)
+)
+
+table_df$TrajID <- as.factor(table_df$TrajID)
+
+p1 <- ggplot(table_df, aes(TrajID, edit_dist, fill = TrajID)) +
+  geom_col() +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(x = "Trajectory ID", y = "Edit distance")
+
+```
+
+### DTW 
+
+```{r}
+
+DTW(traj1 = t1, traj2 = t2, pointSpacing=-1) # 3650.025
+DTW(traj1 = t1, traj2 = t3, pointSpacing=-1) # 50785.51
+DTW(traj1 = t1, traj2 = t4, pointSpacing=-1) # 5906.787
+DTW(traj1 = t1, traj2 = t5, pointSpacing=-1) # 2178.411
+DTW(traj1 = t1, traj2 = t6, pointSpacing=-1) # 1152.718
+
+table_df <- table_df |> 
+  mutate(dtw_all = c(3650.025, 50785.51, 5906.787, 2178.411, 1152.718))
+
+p2 <- ggplot(table_df, aes(TrajID, dtw_all, fill = TrajID)) +
+  geom_col() +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(x = "Trajectory ID", y = "DTW")
+
+```
+
+### Frechet distance 
+
+
+```{r}
+
+Frechet(traj1 = t1, traj2 = t2, testLeash=-1) #28.54075
+Frechet(traj1 = t1, traj2 = t3, testLeash=-1) #2307.844
+Frechet(traj1 = t1, traj2 = t4, testLeash=-1) #1069.229
+Frechet(traj1 = t1, traj2 = t5, testLeash=-1) #717.9816
+Frechet(traj1 = t1, traj2 = t6, testLeash=-1) #38.96272
+
+table_df <- table_df |> 
+  mutate(frechet_all = c(28.54075, 2307.844, 1069.229, 717.9816, 38.96272))
+
+p3 <- ggplot(table_df, aes(TrajID, frechet_all, fill = TrajID)) +
+  geom_col() +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(x = "Trajectory ID", y = "Frechet Distance")
+
+```
+
+### LCSS
+
+LCSStakes very long to compute. The accuracy of the algorithm (pointSpacing = ,pointDistance = and errorMarg =) can be varied to provide faster calculations. Please see Vlachos et al. (2002) for more information.
+
+```{r}
+
+LCSS(traj1 = t1, traj2 = t2, pointSpacing=5, pointDistance=50, 
+     errorMarg=1, returnTrans=FALSE) #8
+LCSS(traj1 = t1, traj2 = t3, pointSpacing=5, pointDistance=50, 
+     errorMarg=1, returnTrans=FALSE) #2
+LCSS(traj1 = t1, traj2 = t4, pointSpacing=5, pointDistance=50, 
+     errorMarg=1, returnTrans=FALSE) #25
+LCSS(traj1 = t1, traj2 = t5, pointSpacing=5, pointDistance=50, 
+     errorMarg=1, returnTrans=FALSE) #41
+LCSS(traj1 = t1, traj2 = t6, pointSpacing=5, pointDistance=50, 
+     errorMarg=1, returnTrans=FALSE) #47
+
+table_df <- table_df |> 
+  mutate(LCSS_all = c(8, 2, 25, 41, 47))
+
+p4 <- ggplot(table_df, aes(TrajID, LCSS_all, fill = TrajID)) +
+  geom_col() +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(x = "Trajectory ID", y = "LCSS")
+
+```
+
+Before visualizing your results think about the following: Which two trajectories to you perceive to be most similar, which are most dissimilar? 
+
+--> most similar: TrajID 1 and 6 
+
+--> most dissimilar: TrajID 1 and 4 or 2
+
+Now visualize the results from the computed similarity measures. Which measure reflects your own intuition the closest?
+
+```{r}
+
+library(patchwork)
+
+p1 + p2 + p3 + p4 +
+  plot_layout(ncol = 2, nrow = 2) +
+    plot_annotation(
+      title = "Computed similarities using different measures between trajectory 1 and all other trajectories")
+
+```
+
+
